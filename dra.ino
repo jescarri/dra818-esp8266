@@ -19,15 +19,17 @@
 #define STATUS_PIN 2
 #define IOTWEBCONF_CONFIG_USE_MDNS 80
 #define IOTWEBCONF_STATUS_ENABLED 2
+#define MQTT_MAX_RECONNECT 3
 
 const char thingName[] = "dra818v";
 const char wifiInitialApPassword[] = "VA7RCVdra";
 bool ipPrinted = false;
 bool needMqttConnect = false;
-unsigned long lastReport = 0;
+unsigned long lastReportPTT = 0;
+unsigned long lastReportSQL = 0;
 unsigned long lastMqttConnectionAttempt = 0;
 bool pttState = HIGH;
-bool sqlState = LOW;
+bool sqlState = HIGH;
 bool retained = false;
 int qos = 1;
 bool dup = false;
@@ -53,6 +55,7 @@ static char sqvolValues[][STRING_LEN] = { "1", "2", "3", "4", "5", "6", "7", "8"
 char mqttServerVal[STRING_LEN];
 char mqttUserVal[STRING_LEN];
 char mqttPasswordVal[STRING_LEN];
+int mqttReconnectAttempts = 0;
 
 DNSServer dnsServer;
 WebServer server(80);
@@ -189,27 +192,30 @@ void wifiConnected()
 
 void setupMqtt()
 {
-    if (WiFi.status() != WL_CONNECTED) {
-	return;
-    }
-    while (!mqttclient.connected()) {
-	Serial.println("Connecting to MQTT...");
-	char clientId[20];
-	String a = WiFi.macAddress();
-	String wm = "{\"name\":\"tempcontroller\",\"status\":\"dead\"}";
-	char willTopic[50];
-	char willMessage[24];
-	a.toCharArray(clientId, 20);
-	String wt = "dra818/lastwill";
-	wt.toCharArray(willTopic, 30);
-	wm.toCharArray(willMessage, 40);
-	mqttclient.setServer(mqttServerVal, 1883);
-	if (mqttclient.connect(clientId, mqttUserVal, mqttPasswordVal, willTopic, 2, 0, willMessage)) {
-	    Serial.println("connected");
-	} else {
-	    Serial.print("failed with state ");
-	    Serial.print(mqttclient.state());
-	    delay(2000);
+    if (WiFi.status() == WL_CONNECTED) {
+	while (!mqttclient.connected()) {
+	    if (mqttReconnectAttempts > MQTT_MAX_RECONNECT) {
+		return;
+	    }
+	    Serial.println("Connecting to MQTT...");
+	    char clientId[20];
+	    String a = WiFi.macAddress();
+	    String wm = "{\"name\":\"tempcontroller\",\"status\":\"dead\"}";
+	    char willTopic[50];
+	    char willMessage[24];
+	    a.toCharArray(clientId, 20);
+	    String wt = "dra818/lastwill";
+	    wt.toCharArray(willTopic, 30);
+	    wm.toCharArray(willMessage, 40);
+	    mqttclient.setServer(mqttServerVal, 1883);
+	    if (mqttclient.connect(clientId, mqttUserVal, mqttPasswordVal, willTopic, 2, 0, willMessage)) {
+		mqttReconnectAttempts = 0;
+		Serial.println("connected");
+	    } else {
+		Serial.print("failed with state ");
+		Serial.print(mqttclient.state());
+		mqttReconnectAttempts++;
+	    }
 	}
     }
 }
@@ -218,15 +224,19 @@ void reportPTT()
 {
     unsigned long now = millis();
     if (mqttclient.connected()) {
-	if ((500 < now - lastReport) && (pttState != digitalRead(PTT))) {
+	if ((500 < now - lastReportPTT) && (pttState != digitalRead(PTT))) {
 	    pttState = 1 - pttState; // invert pin state as it is changed
-	    lastReport = now;
-	    Serial.print("Sending on MQTT channel 'dra/ptt' :");
+	    lastReportPTT = now;
+	    Serial.print("Sending on MQTT channel 'dra818/ptt' :");
 	    Serial.println(pttState == LOW ? "ON" : "OFF");
-	    const char* state = (pttState == LOW ? "ACTIVE" : "INACTIVE");
-	    char payload[10] = { 0 };
-	    strncpy(payload, state, sizeof(state));
-	    bool ok = mqttclient.publish("dra818/ptt", payload);
+	    switch (pttState) {
+	    case LOW:
+		mqttclient.publish("dra818/ptt", "1");
+		break;
+	    case HIGH:
+		mqttclient.publish("dra818/ptt", "0");
+		break;
+	    }
 	}
     }
 }
@@ -235,15 +245,20 @@ void reportSQL()
 {
     unsigned long now = millis();
     if (mqttclient.connected()) {
-	if ((500 < now - lastReport) && (pttState != digitalRead(SQL))) {
+	if ((500 < now - lastReportSQL) && (sqlState != digitalRead(SQL))) {
+	    Serial.println("w000t");
 	    sqlState = 1 - sqlState; // invert pin state as it is changed
-	    lastReport = now;
-	    Serial.print("Sending on MQTT channel 'dra/sql' :");
+	    lastReportSQL = now;
+	    Serial.print("Sending on MQTT channel 'dra818/sql' :");
 	    Serial.println(sqlState == LOW ? "ON" : "OFF");
-	    const char* state = (sqlState == LOW ? "ACTIVE" : "INACTIVE");
-	    char payload[10] = { 0 };
-	    strncpy(payload, state, sizeof(state));
-	    bool ok = mqttclient.publish("dra818/sql", payload);
+	    switch (sqlState) {
+	    case LOW:
+		mqttclient.publish("dra818/sql", "1");
+		break;
+	    case HIGH:
+		mqttclient.publish("dra818/sql", "0");
+		break;
+	    }
 	}
     }
 }
