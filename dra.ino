@@ -1,10 +1,10 @@
-#include <ArduinoMqttClient.h>
 #include <DRA818.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 #include <ElegantOTA.h>
 #include <IotWebConf.h>
 #include <IotWebConfUsing.h>
+#include <PubSubClient.h>
 #include <SoftwareSerial.h>
 
 #define TXT_POW 14
@@ -27,6 +27,7 @@ bool needMqttConnect = false;
 unsigned long lastReport = 0;
 unsigned long lastMqttConnectionAttempt = 0;
 bool pttState = HIGH;
+bool sqlState = LOW;
 bool retained = false;
 int qos = 1;
 bool dup = false;
@@ -37,6 +38,7 @@ void configSaved();
 bool formValidator(iotwebconf::WebRequestWrapper* webRequestWrapper);
 void wifiConnected();
 void reportPTT();
+void reportSQL();
 
 char tx_rx_freqVal[NUMBER_LEN];
 char otaPasswordVal[STRING_LEN];
@@ -55,7 +57,7 @@ char mqttPasswordVal[STRING_LEN];
 DNSServer dnsServer;
 WebServer server(80);
 WiFiClient net;
-MqttClient mqttClient(net);
+PubSubClient mqttclient(net);
 SoftwareSerial dra_serial(TX_PIN, RX_PIN);
 DRA818 dra(&dra_serial, PTT);
 
@@ -130,8 +132,13 @@ void setup()
 void loop()
 {
     iotWebConf.doLoop();
-    mqttClient.poll();
-    reportPTT();
+    if (validConfig) {
+	if (!mqttclient.loop()) {
+	    setupMqtt();
+	}
+	reportPTT();
+	reportSQL();
+    }
 }
 
 void handleRoot()
@@ -173,34 +180,70 @@ bool formValidator(iotwebconf::WebRequestWrapper* webRequestWrapper)
 
 void wifiConnected()
 {
-    needMqttConnect = true;
     Serial.println(WiFi.localIP());
-    Serial.println("Connecting to MQTT");
     if (validConfig) {
-	mqttClient.setUsernamePassword(mqttUserVal, mqttPasswordVal);
-	if (!mqttClient.connect(mqttServerVal, 1883)) {
-	    Serial.print("MQTT connection failed! Error code = ");
-	    Serial.println(mqttClient.connectError());
-	    while (1)
-		;
-	}
+	setupMqtt();
 	Serial.println("Connected to MQTT");
+    }
+}
+
+void setupMqtt()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+	return;
+    }
+    while (!mqttclient.connected()) {
+	Serial.println("Connecting to MQTT...");
+	char clientId[20];
+	String a = WiFi.macAddress();
+	String wm = "{\"name\":\"tempcontroller\",\"status\":\"dead\"}";
+	char willTopic[50];
+	char willMessage[24];
+	a.toCharArray(clientId, 20);
+	String wt = "dra818/lastwill";
+	wt.toCharArray(willTopic, 30);
+	wm.toCharArray(willMessage, 40);
+	mqttclient.setServer(mqttServerVal, 1883);
+	if (mqttclient.connect(clientId, mqttUserVal, mqttPasswordVal, willTopic, 2, 0, willMessage)) {
+	    Serial.println("connected");
+	} else {
+	    Serial.print("failed with state ");
+	    Serial.print(mqttclient.state());
+	    delay(2000);
+	}
     }
 }
 
 void reportPTT()
 {
     unsigned long now = millis();
-    if (mqttClient.connected()) {
+    if (mqttclient.connected()) {
 	if ((500 < now - lastReport) && (pttState != digitalRead(PTT))) {
 	    pttState = 1 - pttState; // invert pin state as it is changed
 	    lastReport = now;
 	    Serial.print("Sending on MQTT channel 'dra/ptt' :");
 	    Serial.println(pttState == LOW ? "ON" : "OFF");
-	    String payload = (pttState == LOW ? "ACTIVE" : "INACTIVE");
-	    /*mqttClient.beginMessage("dra/ptt", payload.length(),retained, qos, dup);
-     mqttClient.print(payload);
-     mqttClient.endMessage();*/
+	    const char* state = (pttState == LOW ? "ACTIVE" : "INACTIVE");
+	    char payload[10] = { 0 };
+	    strncpy(payload, state, sizeof(state));
+	    bool ok = mqttclient.publish("dra818/ptt", payload);
+	}
+    }
+}
+
+void reportSQL()
+{
+    unsigned long now = millis();
+    if (mqttclient.connected()) {
+	if ((500 < now - lastReport) && (pttState != digitalRead(SQL))) {
+	    sqlState = 1 - sqlState; // invert pin state as it is changed
+	    lastReport = now;
+	    Serial.print("Sending on MQTT channel 'dra/sql' :");
+	    Serial.println(sqlState == LOW ? "ON" : "OFF");
+	    const char* state = (sqlState == LOW ? "ACTIVE" : "INACTIVE");
+	    char payload[10] = { 0 };
+	    strncpy(payload, state, sizeof(state));
+	    bool ok = mqttclient.publish("dra818/sql", payload);
 	}
     }
 }
